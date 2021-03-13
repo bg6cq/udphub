@@ -8,18 +8,14 @@
 
 ### 程序使用：
 
-```
-1. 下载程序
+下载、编译、执行程序
 
+```
 cd /usr/src/
 git clone https://github.com/bg6cq/udphub.git
 
-2. 编译程序
-
 cd /usr/src/udphub
 make
-
-3. 执行程序
 
 /usr/src/udphub 
 
