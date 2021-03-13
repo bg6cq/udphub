@@ -1,6 +1,13 @@
-/* 在60050 端口接收UDP包
-   发送给最近10秒钟发过数据的机器
+/* 2021.03.13 bg6cq james@ustc.edu.cn
 
+程序功能：
+   在60050 端口接收UDP包
+   发送给最近100秒钟发过数据的机器
+   
+   v1.0 转发给所有其他设备
+   v1.1 根据数据包头前14字节转发
+        数据包头前14字节是: 发送设备序列号7字节 + 接收设备序列号7字节
+        根据数据包头信息转发给对应的设备
 */
 
 #include <stdio.h>
@@ -19,11 +26,12 @@
 #include <signal.h>
 #include <ctype.h>
 
-// 客户端有效期时间，默认10秒
-#define CTIMEOUT 10
+// 客户端有效期时间，默认100秒
+#define CTIMEOUT 100
 
 // 最长数据包
 #define MAXLEN 1460
+#define CPUIDLEN 7
 
 int daemon_proc = 0;
 int debug = 0;
@@ -33,6 +41,7 @@ int port = 60050;
 int total_clients = 0;
 
 struct {
+	unsigned char CPUID[CPUIDLEN];
 	struct sockaddr_storage rmt;
 	int slen;
 	time_t last_tm;
@@ -40,13 +49,14 @@ struct {
 	unsigned long int send_pkts, send_bytes;
 } clients[MAXCLIENTS];
 
-// 根据对方IP和端口号信息，返回client编号，并且找到时更新last_tm时间
+// 根据CPUID 返回client编号，并更新last_tm时间和IP地址和端口信息
 // 如果找不到返回 -1
-int find_client(struct sockaddr_storage *r, int slen)
+int find_and_update_client(unsigned char *cpuid, struct sockaddr_storage *r, int slen)
 {
 	int i;
 	for (i = 0; i < total_clients; i++)
-		if (memcmp(&clients[i].rmt, r, slen) == 0) {
+		if (memcmp(&clients[i].CPUID, cpuid, CPUIDLEN) == 0) {
+			memcpy((void *)&clients[i].rmt, r, slen);
 			clients[i].last_tm = time(NULL);
 			if (debug)
 				printf("find_client: return %d\n", i);
@@ -57,19 +67,20 @@ int find_client(struct sockaddr_storage *r, int slen)
 	return -1;
 }
 
-// 将对方IP和端口号信息加入client
+// 将对方CPUID、IP地址和端口号信息加入client
 // 会覆盖 last_tm > CTIMEOUT 的表相
 // 或者在最后添加
 // 返回添加的client编号
 // 如果客户端数量到了MAXCLIENTS，返回-1
-int add_client(struct sockaddr_storage *r, int slen)
+int add_client(unsigned char *cpuid, struct sockaddr_storage *r, int slen)
 {
 	int i;
 	time_t tm;
 	tm = time(NULL);
 	for (i = 0; i < total_clients; i++)
 		if (clients[i].last_tm < tm - CTIMEOUT) {
-			memcpy((void *)&clients[i].rmt, r, sizeof(struct sockaddr_storage));
+			memcpy((void *)&clients[i].CPUID, cpuid, CPUIDLEN);
+			memcpy((void *)&clients[i].rmt, r, slen);
 			clients[i].last_tm = tm;
 			clients[i].slen = slen;
 			if (debug)
@@ -78,7 +89,8 @@ int add_client(struct sockaddr_storage *r, int slen)
 		}
 	if (total_clients < MAXCLIENTS) {
 		i = total_clients;
-		memcpy((void *)&clients[i].rmt, r, sizeof(struct sockaddr_storage));
+		memcpy((void *)&clients[i].CPUID, cpuid, CPUIDLEN);
+		memcpy((void *)&clients[i].rmt, r, slen);
 		clients[i].last_tm = tm;
 		clients[i].slen = slen;
 		total_clients++;
@@ -119,31 +131,38 @@ void daemon_init(void)
 	openlog("relayudp", LOG_PID, LOG_DAEMON);
 }
 
-void sendudp(char *buf, int len, char *host, int port)
+char *print_addr(struct sockaddr *r, socklen_t rlen)
 {
-	struct sockaddr_in si_other;
-	int s, slen = sizeof(si_other);
-	int l;
-#ifdef DEBUG
-	fprintf(stderr, "send to %s,", host);
-#endif
-	if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
-		fprintf(stderr, "socket error");
-		return;
+	static char remoteaddr[200];
+	if (r->sa_family == AF_INET) {
+		int rp;
+		struct sockaddr_in *rv4;
+		rv4 = (struct sockaddr_in *)r;
+		rp = ntohs(rv4->sin_port);
+		inet_ntop(AF_INET, &rv4->sin_addr, remoteaddr, 200);
+		sprintf(remoteaddr + strlen(remoteaddr), ":%d", rp);
+		return remoteaddr;
+	} else if (r->sa_family == AF_INET6) {
+		int rp;
+		struct sockaddr_in6 *rv6;
+		rv6 = (struct sockaddr_in6 *)r;
+		rp = ntohs(rv6->sin6_port);
+		inet_ntop(AF_INET6, &rv6->sin6_addr, remoteaddr, 200);
+		sprintf(remoteaddr + strlen(remoteaddr), ":%d", rp);
+		return remoteaddr;
 	}
-	memset((char *)&si_other, 0, sizeof(si_other));
-	si_other.sin_family = AF_INET;
-	si_other.sin_port = htons(port);
-	if (inet_aton(host, &si_other.sin_addr) == 0) {
-		fprintf(stderr, "inet_aton() failed\n");
-		close(s);
-		return;
-	}
-	l = sendto(s, buf, len, 0, (const struct sockaddr *)&si_other, slen);
-#ifdef DEBUG
-	fprintf(stderr, "%d\n", l);
-#endif
-	close(s);
+	strcpy(remoteaddr, "Unknow Addr");
+	return remoteaddr;
+}
+
+char *print_cpuid(unsigned char *cpuid)
+{
+	static char cpuidstr[CPUIDLEN * 2 + 1];
+	int i;
+	for (i = 0; i < CPUIDLEN; i++)
+		sprintf(cpuidstr + i * 2, "%02X", cpuid[i]);
+	cpuidstr[CPUIDLEN * 2] = 0;
+	return cpuidstr;
 }
 
 void usage()
@@ -188,29 +207,22 @@ int main(int argc, char *argv[])
 		diep("bind");
 
 	while (1) {
-		char buf[MAXLEN];
+		unsigned char buf[MAXLEN];
 		int len;
 		len = recvfrom(s, buf, MAXLEN, 0, (struct sockaddr *)&r, (socklen_t *) & rlen);
 		if (len <= 0)
 			continue;
 		buf[len] = 0;
 		if (debug) {
-			if (r.ss_family == AF_INET) {
-				char remoteip[200];
-				int rp;
-				struct sockaddr_in *rv4;
-				rv4 = (struct sockaddr_in *)&r;
-				rp = ntohs(rv4->sin_port);
-				inet_ntop(AF_INET, &rv4->sin_addr, remoteip, 200);
-				printf("RECV PKT LEN=%d from: %s:%d\n", len, remoteip, rp);
-			} else {
-				printf("unknown packt\n");
-			}
+			printf("RECV PKT LEN=%d", len);
+			printf(" from: %s", print_addr((struct sockaddr *)&r, rlen));
+			printf(" %s -> ", print_cpuid(buf));
+			printf("%s\n", print_cpuid(buf + CPUIDLEN));
 		}
 		int clientidx;
-		clientidx = find_client(&r, rlen);
+		clientidx = find_and_update_client(buf, &r, rlen);
 		if (clientidx == -1) {	// 新客户端
-			clientidx = add_client(&r, rlen);
+			clientidx = add_client(buf, &r, rlen);
 			if (clientidx == -1) {	// 客户端满了，忽略
 				if (debug)
 					printf("client full\n");
@@ -220,26 +232,20 @@ int main(int argc, char *argv[])
 		time_t rtm = time(NULL);
 		int i;
 		for (i = 0; i < total_clients; i++) {	//发送给其他机器
-			if (i == clientidx)	// 跳过自己
-				continue;
 			if (clients[i].last_tm < rtm - CTIMEOUT)	// 跳过时间超过10秒的
 				continue;
-			int l;
-			l = sendto(s, buf, len, 0, (const struct sockaddr *)&(clients[i].rmt), clients[i].slen);
-			if (debug) {
-				struct sockaddr_storage *r;
-				r = (struct sockaddr_storage *)(&clients[i].rmt);
-				if (r->ss_family == AF_INET) {
-					char remoteip[200];
-					int rp;
-					struct sockaddr_in *rv4;
-					rv4 = (struct sockaddr_in *)r;
-					rp = ntohs(rv4->sin_port);
-					inet_ntop(AF_INET, &rv4->sin_addr, remoteip, 200);
-					printf("SEND PKT LEN=%d to:%d %s:%d\n", l, i, remoteip, rp);
-				} else {
-					printf("unknown packt\n");
+			if (memcmp(buf + CPUIDLEN, clients[i].CPUID, CPUIDLEN) == 0) {
+				int l;
+				l = sendto(s, buf, len, 0, (const struct sockaddr *)&(clients[i].rmt), clients[i].slen);
+				if (debug) {
+					struct sockaddr_storage *r;
+					r = (struct sockaddr_storage *)(&clients[i].rmt);
+					int rlen = clients[i].slen;
+					printf("SEND PKT LEN=%d", l);
+					printf(" to:%s", print_addr((struct sockaddr *)r, rlen));
+					printf(" CPUID %s\n\n", print_cpuid(clients[i].CPUID));
 				}
+				break;
 			}
 		}
 	}
