@@ -9,6 +9,11 @@
         数据包头前14字节是: 发送设备序列号7字节 + 接收设备序列号7字节
         根据数据包头信息转发给对应的设备
    v1.2 增加IPv6支持
+   v1.3 数据包头格式修改
+        NRL2  4 byte 固定的 "NRL2"
+        XX    2 byte 包长度 
+        CPUID 7 byte 发送设备序列号
+        CPUID 7 byte 接收设备序列号
 
 */
 
@@ -242,29 +247,31 @@ int main(int argc, char *argv[])
 		if (debug) {
 			printf("RECV PKT LEN=%d", len);
 			printf(" from: %s", print_addr((struct sockaddr *)&r, rlen));
-			printf(" %s -> ", print_cpuid(buf));
-			printf("%s\n", print_cpuid(buf + CPUIDLEN));
+			printf(" %s -> ", print_cpuid(buf + 6));
+			printf("%s\n", print_cpuid(buf + 6 + CPUIDLEN));
 		}
-		if (len < CPUIDLEN)
+		if (len < CPUIDLEN + 6)
+			continue;
+		if (memcmp(buf, "NRL2", 4) != 0)
 			continue;
 		int clientidx;
-		clientidx = find_and_update_client(buf, &r, rlen);
+		clientidx = find_and_update_client(buf + 6, &r, rlen);
 		if (clientidx == -1) {	// 新客户端
-			clientidx = add_client(buf, &r, rlen);
+			clientidx = add_client(buf + 6, &r, rlen);
 			if (clientidx == -1) {	// 客户端满了，忽略
 				if (debug)
 					printf("client full\n");
 				continue;
 			}
 		}
-		if (len < CPUIDLEN * 2)
+		if (len < CPUIDLEN * 2 + 6)
 			continue;
 		time_t rtm = time(NULL);
 		int i;
 		for (i = 0; i < total_clients; i++) {	//发送给其他机器
 			if (clients[i].last_tm < rtm - CTIMEOUT)	// 跳过时间超过10秒的
 				continue;
-			if (memcmp(buf + CPUIDLEN, clients[i].CPUID, CPUIDLEN) == 0) {
+			if (memcmp(buf + 6 + CPUIDLEN, clients[i].CPUID, CPUIDLEN) == 0) {
 				int l;
 				l = sendto(s, buf, len, 0, (const struct sockaddr *)&(clients[i].rmt), clients[i].slen);
 				if (debug) {
