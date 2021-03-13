@@ -245,6 +245,8 @@ int main(int argc, char *argv[])
 			printf(" %s -> ", print_cpuid(buf));
 			printf("%s\n", print_cpuid(buf + CPUIDLEN));
 		}
+		if (len < CPUIDLEN)
+			continue;
 		int clientidx;
 		clientidx = find_and_update_client(buf, &r, rlen);
 		if (clientidx == -1) {	// 新客户端
@@ -255,6 +257,8 @@ int main(int argc, char *argv[])
 				continue;
 			}
 		}
+		if (len < CPUIDLEN * 2)
+			continue;
 		time_t rtm = time(NULL);
 		int i;
 		for (i = 0; i < total_clients; i++) {	//发送给其他机器
