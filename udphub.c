@@ -8,6 +8,8 @@
    v1.1 根据数据包头前14字节转发
         数据包头前14字节是: 发送设备序列号7字节 + 接收设备序列号7字节
         根据数据包头信息转发给对应的设备
+   v1.2 增加IPv6支持
+
 */
 
 #include <stdio.h>
@@ -36,6 +38,8 @@
 int daemon_proc = 0;
 int debug = 0;
 int port = 60050;
+int ipv6 = 0;
+char bind_addr[MAXLEN];
 
 #define MAXCLIENTS 1000
 int total_clients = 0;
@@ -167,44 +171,66 @@ char *print_cpuid(unsigned char *cpuid)
 
 void usage()
 {
-	printf("Usage: udphub [ -h ] [ -d ] [ -p port ]\n");
+	printf("Usage: udphub [ -h ] [ -d ] [ -6 ] [ -b bind_addr ] [ -p port ]\n");
+	printf("    -6              enable ipv6 support\n");
+	printf("    -b bind_addr    listen address, default is 0.0.0.0\n");
 	printf("    -p udp_port     UDP port, default is 60050\n");
 	printf("    -d              print debug info\n");
-	printf("    -h              print help\n\n");
+	printf("    -h              print this help\n\n");
 	exit(0);
 }
 
 int main(int argc, char *argv[])
 {
 	int c;
-	while ((c = getopt(argc, argv, "hdp:")) != EOF)
+	while ((c = getopt(argc, argv, "hd6p:b:")) != EOF)
 		switch (c) {
 		case 'h':
 			usage();
 		case 'd':
 			debug = 1;
 			break;
+		case '6':
+			ipv6 = 1;
+			break;
 		case 'p':
 			port = atoi(optarg);
+			break;
+		case 'b':
+			snprintf(bind_addr, MAXLEN - 1, optarg);
 			break;
 		}
 
 	struct sockaddr_storage si_me, r;
-	struct sockaddr_in *si_mev4;
 	int s, rlen = sizeof(r);
 	if (debug == 0)
 		daemon_init();
 
-	if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
-		diep("socket");
-
 	memset((char *)&si_me, 0, sizeof(si_me));
-	si_mev4 = (struct sockaddr_in *)&si_me;
-	si_mev4->sin_family = AF_INET;
-	si_mev4->sin_port = htons(port);
-	si_mev4->sin_addr.s_addr = htonl(INADDR_ANY);
-	if (bind(s, (const struct sockaddr *)&si_me, sizeof(si_me)) == -1)
-		diep("bind");
+	if (ipv6 == 0) {
+		struct sockaddr_in *si_mev4;
+		if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
+			diep("socket");
+
+		si_mev4 = (struct sockaddr_in *)&si_me;
+		si_mev4->sin_family = AF_INET;
+		si_mev4->sin_port = htons(port);
+		if (bind_addr[0])
+			si_mev4->sin_addr.s_addr = inet_addr(bind_addr);
+		if (bind(s, (const struct sockaddr *)&si_me, sizeof(si_me)) == -1)
+			diep("bind");
+	} else {
+		struct sockaddr_in6 *si_mev6;
+		if ((s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)) == -1)
+			diep("socket");
+		si_mev6 = (struct sockaddr_in6 *)&si_me;
+		si_mev6->sin6_family = AF_INET6;
+		si_mev6->sin6_port = htons(port);
+		if (bind_addr[0])
+			inet_pton(AF_INET6, bind_addr, &si_mev6->sin6_addr);
+		if (bind(s, (const struct sockaddr *)&si_me, sizeof(si_me)) == -1)
+			diep("bind");
+	}
 
 	while (1) {
 		unsigned char buf[MAXLEN];
