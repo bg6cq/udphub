@@ -1,5 +1,21 @@
 /* 2021.03.13 bg6cq james@ustc.edu.cn
 
+Program function:
+    Receive UDP packets on port 60050
+    Send to the client that has sent data in the last 100 seconds
+
+    v1.0 forwarded to all other devices
+    v1.1 Forward according to the first 14 bytes of the packet header
+         The first 14 bytes of the data packet header are: 
+             7 bytes of the serial number of the sending device + 7 bytes of the serial number of the receiving device
+         Forward to the corresponding device according to the packet header information
+    v1.2 Add IPv6 support
+    v1.3 Data packet header format modification
+         NRL2 4 byte Fixed "NRL2"
+         XX 2 byte packet length
+         CPUID 7 byte Sending device serial number
+         CPUID 7 byte receiving device serial number
+
 程序功能：
    在60050 端口接收UDP包
    发送给最近100秒钟发过数据的机器
@@ -33,9 +49,11 @@
 #include <signal.h>
 #include <ctype.h>
 
+// Client timeout, default 100 seconds
 // 客户端有效期时间，默认100秒
 #define CTIMEOUT 100
 
+// max packet len
 // 最长数据包
 #define MAXLEN 1460
 #define CPUIDLEN 7
@@ -137,7 +155,7 @@ void daemon_init(void)
 	for (i = 0; i < 3; i++)
 		close(i);
 	daemon_proc = 1;
-	openlog("relayudp", LOG_PID, LOG_DAEMON);
+	openlog("udphub", LOG_PID, LOG_DAEMON);
 }
 
 char *print_addr(struct sockaddr *r, socklen_t rlen)
